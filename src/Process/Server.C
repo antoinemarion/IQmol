@@ -28,6 +28,7 @@
 #include "SshConnection.h"
 #include "HttpConnection.h"
 #include "WriteToTemporaryFile.h"
+#include "SystemDependent.h"
 #include "TextStream.h"
 #include "JobMonitor.h"
 #include "Preferences.h"
@@ -83,71 +84,90 @@ void Server::closeConnection()
 
 bool Server::open()
 {
+   bool ok(true);
    // Short circuit the open if we have already been authenticated.
-   if (m_connection && m_connection->status() == Network::Connection::Authenticated) return true;
+   if (m_connection && m_connection->status() == Network::Authenticated) return true;
+
+   QString address(m_configuration.value(ServerConfiguration::HostAddress));
+   QString publicKeyFile(m_configuration.value(ServerConfiguration::PublicKeyFile));
+   QString privateKeyFile(m_configuration.value(ServerConfiguration::PrivateKeyFile));
+   QString knownHostsFile(m_configuration.value(ServerConfiguration::KnownHostsFile));
 
    if (!m_connection) {
       QLOG_TRACE() << "Creating connection" 
                    << m_configuration.value(ServerConfiguration::Connection);
 
-      QVariant address(m_configuration.value(ServerConfiguration::HostAddress));
       int port(m_configuration.port());
 
       switch (m_configuration.connection()) {
-         case ServerConfiguration::Local:
+         case Network::Local:
             m_connection = new Network::LocalConnection();
             break;
-         case ServerConfiguration::SSH:
-            m_connection = new Network::SshConnection(address.toString(), port);
+         case Network::SSH:
+         case Network::SFTP:
+            m_connection = new Network::SshConnection(address, port, 
+               publicKeyFile, privateKeyFile, knownHostsFile, true);
             break;
-         case ServerConfiguration::SFTP:
-            m_connection = new Network::SshConnection(address.toString(), port, true);
+         case Network::HTTP:
+            m_connection = new Network::HttpConnection(address, port);
             break;
-         case ServerConfiguration::HTTP:
-            m_connection = new Network::HttpConnection(address.toString(), port);
-            break;
-         case ServerConfiguration::HTTPS:
-            m_connection = new Network::HttpConnection(address.toString(), port, true);
+         case Network::HTTPS:
+            m_connection = new Network::HttpConnection(address, port, true);
             break;
       }
    }
 
-   if (m_connection->status() == Network::Connection::Closed) {
-      QLOG_TRACE() << "Opening connection to server" << name();
+   if (m_connection->status() == Network::Closed) {
       m_connection->open();
    }
 
-   if (m_connection->status() == Network::Connection::Opened) {
+   if (m_connection->status() == Network::Opened) {
       QLOG_TRACE() << "Authenticating connection";
-      Network::Connection::AuthenticationT 
+      Network::AuthenticationT 
          authentication(m_configuration.authentication());
 
       if (m_configuration.isWebBased()) {
          QString cookie(m_configuration.value(ServerConfiguration::Cookie));
-         m_connection->authenticate(authentication, cookie);
+
+         if (authentication == Network::Password) {
+            // Update our JWT through the authentication server.
+            int authenticationPort(m_configuration.authenticationPort());
+            QString userName(m_configuration.value(ServerConfiguration::UserName));
+            QString jwt(userName);
+
+            Network::HttpConnection conn(address, authenticationPort);
+            conn.open();
+            conn.authenticate(authentication, jwt);
+            if (conn.status() == Network::Authenticated) {
+               cookie = jwt;
+               m_connection->setStatus(Network::Authenticated);
+            }
+         }else {
+            m_connection->authenticate(authentication, cookie);
+         }
+
          m_configuration.setValue(ServerConfiguration::Cookie, cookie);
          ServerRegistry::save();
+
       }else {
          QString userName(m_configuration.value(ServerConfiguration::UserName));
          m_connection->authenticate(authentication, userName);
       }
    }
 
-   if (m_connection->status() == Network::Connection::Authenticated) {
+   if (m_connection->status() == Network::Authenticated) {
       if (!m_watchedJobs.isEmpty()) {
          queryAllJobs();
          startUpdates();
       }
-      return true;
-   }
-
-   if (m_connection->status() == Network::Connection::Error) {
-      QLOG_ERROR() << "Failed to connect to server " + name();
+   }else {
+      m_message = m_connection->message();
       delete m_connection;
       m_connection = 0;
+      ok = false;
    }
 
-   return false;
+   return ok;
 }
 
 
@@ -289,7 +309,6 @@ void Server::copyRunFile()
 
 void Server::queueJob()
 {
-qDebug() << "QJI - trace Server::queueJob()";
    Network::Reply* reply(qobject_cast<Network::Reply*>(sender()));
 
    if (reply && m_activeRequests.contains(reply)) {
@@ -314,6 +333,13 @@ qDebug() << "QJI - trace Server::queueJob()";
       submit = job->substituteMacros(submit);
 
       QString workingDirectory(job->jobInfo().get(QChemJobInfo::RemoteWorkingDirectory));
+
+      if (isBasic()) {
+         // Cache a list of currently running qchem jobs so we can identify the new one
+         QString exeName(m_configuration.value(ServerConfiguration::QueueInfo));
+         m_qcprogs = System::GetMatchingProcessIds(exeName);
+         m_cmds    = System::GetMatchingProcessIds("cmd.exe");
+      }
 
       // Note that the execute takes a working directory which is changed into before
       // executing the command.  If the Working Directory path is relative, and if
@@ -340,8 +366,6 @@ void Server::submitFinished()
       m_activeRequests.remove(reply);
 
       if (job) {
-qDebug() << "Server.C job info dump:";
-job->jobInfo().dump();
          if (reply->status() == Network::Reply::Finished && 
               parseSubmitMessage(job, reply->message())) {
             job->setStatus(Job::Queued);
@@ -417,8 +441,52 @@ bool Server::parseSubmitMessage(Job* job, QString const& message)
       } break;
 
       case ServerConfiguration::Basic: {
+         if (isLocal()) {
+            int count(0);
+
+            QString exeName(m_configuration.value(ServerConfiguration::QueueInfo));
+
+            QList<unsigned> qcprogs = System::GetMatchingProcessIds(exeName);
+
+            while (count <= 4 && qcprogs.size() <= m_qcprogs.size()) {
+               qDebug() << "searching" <<  count << qcprogs.size() << m_qcprogs.size();
+               QThread::msleep(500) ;
+               qcprogs = System::GetMatchingProcessIds(exeName);
+               count++;
+            }
+
+            QLOG_DEBUG() << "Original list of PIDS:";
+            QLOG_DEBUG() << m_qcprogs; 
+            QLOG_DEBUG() << "New list of PIDS:";
+            QLOG_DEBUG() << qcprogs; 
+  
+            QList<unsigned>::iterator iter;
+            int jobid(-1);
+            for (iter = qcprogs.begin(); iter != qcprogs.end(); ++iter) {
+                if (!m_qcprogs.contains(*iter)) {
+                   qDebug() << "Setting job id to:" << QString::number(*iter);
+                   jobid = *iter;
+                   break;
+                }
+            }
+            job->setJobId(QString::number(jobid));
+            ok = true;
+
+         }else {
+            QStringList tokens(message.split(QRegExp("\\s+"), QString::SkipEmptyParts));
+            if (tokens.size() == 1) {  // bash returns only the pid
+               int id(tokens[0].toInt(&ok));
+               if (ok) job->setJobId(QString::number(id));
+            }else if (tokens.size() >= 2) { // skip csh initial [1] 
+               int id(tokens[1].toInt(&ok));
+               if (ok) job->setJobId(QString::number(id));
+            }
+         }
+/*
          qDebug() << "Need to correctly parse submit message for server type "
                   << ServerConfiguration::toString(m_configuration.queueSystem());
+         QLOG_DEBUG() << "Submit message:" << message;
+
          // A successful submission returns a string like:
          //   [1] 9876 $QC/exe/qcprog.exe .aaaa.inp.9876.qcin.1 $QCSCRATCH/local/qchem9876
          // ...or on Windows we parse for the following 
@@ -435,15 +503,8 @@ bool Server::parseSubmitMessage(Job* job, QString const& message)
                ok = true;
             }
          }else {
-            QStringList tokens(message.split(QRegExp("\\s+"), QString::SkipEmptyParts));
-            if (tokens.size() == 1) {  // bash returns only the pid
-               int id(tokens[0].toInt(&ok));
-               if (ok) job->setJobId(QString::number(id));
-            }else if (tokens.size() >= 2) { // skip csh initial [1] 
-               int id(tokens[1].toInt(&ok));
-               if (ok) job->setJobId(QString::number(id));
-            }
          }
+*/
       } break;
 
       default:
@@ -567,6 +628,7 @@ bool Server::parseQueryMessage(Job* job, QString const& message)
             if (rv == "DONE")    status = Job::Finished;
             if (rv == "RUNNING") status = Job::Running;
             if (rv == "QUEUED")  status = Job::Queued;
+            if (rv == "NEW")     status = Job::Queued;
             if (rv == "ERROR")   status = Job::Error;
             ok = true;
           }
@@ -632,6 +694,8 @@ bool Server::parseQueryMessage(Job* job, QString const& message)
          if (message.isEmpty()) {
             status = Job::Finished;
          }else if (message.contains("No tasks are running")) { // Windows
+            status = Job::Finished;
+         }else if (message.contains("ERROR")) { // Windows
             status = Job::Finished;
          }else if (message.contains(Preferences::ServerQueryJobFinished())) { // Windows
             status = Job::Finished;

@@ -25,6 +25,7 @@
 #include <QString>
 
 #ifdef WIN32
+#include <winsock2.h>
 #define in_addr_t u_long
 #else
 #include <netinet/in.h>
@@ -34,8 +35,28 @@
 namespace IQmol {
 namespace Network {
 
-   enum Error { NoError, Initialization, Timeout, Unknown };
-   QString ToString(Error const& error);
+   enum ErrorT { NoError, Initialization, Timeout, Unknown };
+
+   QString ToString(ErrorT const);
+   ErrorT ToErrorT(QString const&);
+
+   enum Status { Closed, Opened, Authenticated, Error };
+
+   QString ToString(Status const);
+   Status ToStatus(QString const&);
+
+   enum ConnectionT { Local, SSH, SFTP, HTTP, HTTPS };
+
+   QString ToString(ConnectionT const);
+   ConnectionT ToConnectionT(QString const &);
+
+   enum AuthenticationT { Anonymous = 0, Agent, HostBased, KeyboardInteractive, 
+            Password, PublicKey };
+
+   QString ToString(AuthenticationT const);
+   AuthenticationT ToAuthenticationT(QString const&);
+
+
 
    /// Returns INADDR_NONE if there is a problem with the name lookup
    in_addr_t HostLookup(QString const& hostname);

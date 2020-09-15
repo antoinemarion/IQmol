@@ -262,7 +262,7 @@ QString QChemDatabaseFilePath()
       dir.cdUp();
       dir.cd("share");
 #else  
-      dir.setPath("/usr/share/iqmol");
+      dir.setPath("/usr/share/IQmol");
 #endif
       databaseFilePath = dir.absolutePath() + "/qchem_option.db";
    }else {
@@ -290,7 +290,7 @@ QString ShaderDirectory()
       dir.cdUp();
       dir.cd("share/shaders");
 #else
-      dir.setPath("/usr/share/iqmol/shaders");
+      dir.setPath("/usr/share/IQmol/shaders");
 #endif
       shaderDir = dir.absolutePath();
    }else {
@@ -775,7 +775,7 @@ QString DefaultServerFile()
       dir.cdUp();
       dir.cd("share");
 #else
-      dir.setPath("/usr/share/iqmol";
+      dir.setPath("/usr/share/iqmol");
 #endif
       QFileInfo info(dir,"default_server.cfg");
       filePath = info.absoluteFilePath(); 

@@ -35,17 +35,17 @@ namespace Process {
    class ServerConfiguration {
 
       friend class ServerConfigurationDialog;
-      typedef Network::Connection::AuthenticationT AuthenticationT;
 
       public:
          enum FieldT { ServerName = 0, Connection, QueueSystem, HostAddress, Port,
                        Authentication, UserName, WorkingDirectory,
                        Submit, Query, QueueInfo, Kill,
                        UpdateInterval, JobLimit, RunFileTemplate, Cookie, 
-                       QueueResources, JobFileList, MaxFieldT };
+                       QueueResources, JobFileList, 
+                       PublicKeyFile, PrivateKeyFile, KnownHostsFile, 
+                       AuthenticationPort, 
+                       MaxFieldT };
                        
-         enum ConnectionT { Local, SSH, SFTP, HTTP, HTTPS };
-
          // The order of these is used to set the queueSystem combo box
          // in the ServerConfigutationDialog.C
          enum QueueSystemT { Basic, PBS, SGE, SLURM, Web };
@@ -53,13 +53,10 @@ namespace Process {
          typedef QMap<FieldT, QVariant> ConfigMap;
 
          static QString toString(FieldT const);
-         static QString toString(ConnectionT const);
          static QString toString(QueueSystemT const);
 
          static FieldT toFieldT(QString const& field);
-         static ConnectionT toConnectionT(QString const& connection);
          static QueueSystemT toQueueSystemT(QString const& queueSystem);
-         static AuthenticationT toAuthenticationT(QString const& authentication);
 
          ServerConfiguration(); 
          ServerConfiguration(ServerConfiguration const&);
@@ -69,19 +66,25 @@ namespace Process {
          QString value(FieldT const) const;
          void setValue(FieldT const, QVariant const& value);
 
-         ConnectionT connection() const;
          QueueSystemT queueSystem() const;
-         AuthenticationT authentication() const;
-         int  port() const;
-         int  updateInterval() const;
+         Network::ConnectionT connection() const;
+         Network::AuthenticationT authentication() const;
+
+         int authenticationPort() const;
+         int port() const;
+         int updateInterval() const;
          QVariantList queueResourcesList() const;
 
          bool isWebBased() const {
-            return (connection() == HTTP || connection() == HTTPS);
+            return (connection() == Network::HTTP || connection() == Network::HTTPS);
          }
 
          bool isLocal() const {
-            return connection() == Local;
+            return connection() == Network::Local;
+         }
+
+         bool isBasic() const {
+            return queueSystem() == Basic;
          }
 
          bool needsResourceLimits() const {
@@ -96,7 +99,7 @@ namespace Process {
          ServerConfiguration& operator=(ServerConfiguration const& that);
 
       protected:
-         void setDefaults(ConnectionT const);
+         void setDefaults(Network::ConnectionT const);
          void setDefaults(QueueSystemT const);
          Data::YamlNode toYamlNode() const;
          
